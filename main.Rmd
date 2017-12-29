@@ -1,0 +1,124 @@
+---
+title: "Prediction of Barbell Lifting Technique using Wearable Sensor Data"
+author: "Alex Van Russelt"
+date: "28 December 2017"
+output:
+  html_document:
+    df_print: paged
+  pdf_document:
+    latex_engine: xelatex
+header-includes:
+- \usepackage[sfdefault]{roboto}
+- \renewcommand{\familydefault}{\sfdefault}
+---
+## Setup
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+```{r, message=FALSE, warning=FALSE}
+library(caret)
+library(dplyr)
+library(knitr)
+library(parallel)
+library(doParallel)
+cluster <- makeCluster(detectCores() - 1) # convention to leave 1 core for OS
+registerDoParallel(cluster)
+set.seed(1234)
+```
+
+## Introduction
+
+The Human Activity Recognition (HAR) dataset contains data from wearable sensors where the user was performing barbell lifts. The `classe` variable contains a label describing the method used to lift the barbell.
+
+The objective of this document is to develop a model that could be used to predict the `classe` variable from the sensor information, and to apply it to 20 unseen observations.
+
+## Exploration
+```{r readingdata}
+training <- read.csv('pml-training.csv', stringsAsFactors = FALSE,
+                     na.strings=c('NA', ''))
+testing <- read.csv('pml-testing.csv', stringsAsFactors = FALSE)
+training$classe <- as.factor(training$classe)
+ncol(training)
+```
+After reading in the data, it is apparent that there are 159 features that could be used to predict `classe`. It would be preferable to reduce the number of components, as it would make the training process execute in a shorter time.
+
+All the missing data in concentrated in particular columns. These columns are almost entirely filled with missing data. These columns are removed here, reducing the feature count to 59:
+```{r remove_na}
+na_count <- sapply(training, function(y) sum(length(which(is.na(y)))))
+columns_to_keep <- names(na_count[na_count == 0])
+
+training <- select(training, columns_to_keep)
+# use head to ignore "classe" target column, as it doesn't exist in testing data
+testing <- select(testing, head(columns_to_keep, -1))
+
+ncol(training)
+```
+
+The first seven columns contain metadata (such as the user and date) that we do not want to predict from, so those are removed, leaving 52 features:
+```{r remove_metadata}
+training <- select(training, -(X:num_window))
+testing <- select(testing, -(X:num_window))
+ncol(training)
+```
+
+The number of features could be reduced even further by using a principle components analysis (PCA):
+```{r pca}
+preProcess(training[,-ncol(training)], method='pca', thresh=0.95)
+```
+This reduces the number of features down to 25, while still capturing 95 % of the variance in the data.
+
+Finally, 15 % of the training data is placed into a validation set that may be used later to estimate the out-of-sample error.
+```{r create_validation}
+inTrain <- createDataPartition(training$classe, p = 0.85)[[1]]
+training <- training[inTrain,]
+validation <- training[-inTrain,]
+```
+
+## Training
+```{r fit, message=FALSE, results=FALSE, cache=TRUE}
+options <- expand.grid(interaction.depth = c(8, 10),
+                       n.trees = c(100, 250, 500, 750),
+                       shrinkage = 0.1,
+                       n.minobsinnode = 10)
+
+control <- trainControl(method = "cv",
+                        number = 4,
+                        allowParallel = TRUE,
+                        preProcOptions = list(threshold = 0.95))
+
+model_gbm <- train(classe ~ .,
+                   data = training,
+                   method = 'gbm',
+                   preProcess = 'pca',
+                   trControl = control,
+                   tuneGrid = options)
+```
+```{r plot_model_result}
+plot(model_gbm)
+```
+A gradient boosting model was used because of its effectiveness in classification problems. The plot shows that 750 iterations and an interaction depth of 10 is sufficient to provide acceptable accuracy; any further increase is likely to provide diminishing returns.
+
+```{r print_model_result}
+kable(model_gbm$results)
+```
+
+A 4-fold cross-validation was used to estimate the out-of-sample performance. As shown above, the expected out-of-sample accuracy for the optimised model is expected to be approximately 97 %. This can be tested further using the validation data set:
+
+```{r validation_testing}
+validation_predictions <- predict(model_gbm, validation)
+conf <- confusionMatrix(validation_predictions, validation$classe)
+kable(conf$table)
+```
+
+In this case, the model achieves 100 % accuracy for the validation set, so the previous estimate does not seem unreasonable.
+
+## Prediction
+
+The predicted `classe` outcomes for the test data set are:
+```{r testing_prediction}
+predict(model_gbm, testing)
+```
+
+
+
+
